@@ -732,64 +732,16 @@ INS_ONLY:    纯 INS 递推，无外部修正
 
 ---
 
-## 已实现
-
-### ignav-contract 模块
-- [x] InsProvider / GnssProvider / TimeProvider 接口定义
-- [x] GTime / ImuMeasurement / InsPrediction / InsSolution / GnssObservation / GnssPositionSolution 数据类
-- [x] InsConfig / GnssConfig / FusionMode / SystemHealth / StateCorrection 配置与状态类
-- [x] ContractVersion 契约版本管理
-
-### ignav-ins 模块
-- [x] InsMech — 正向机械编排（ECEF/NED 双框架，旋转+划桨补偿）
-- [x] InsBackMech — 反向机械编排
-- [x] InsAlignMech — 粗对准 + 精对准 + 速度匹配对准
-- [x] InsInitRt — 实时初始化（单天线速度辅助 / 双天线姿态辅助）
-- [x] InsEkf — EKF 预测、F 矩阵构建、矩阵指数法（precPhi/expmat）
-- [x] InsNhc — 非完整约束（侧向/垂向速度 = 0）
-- [x] InsZvu — 零速更新（ZVU）
-- [x] InsZaru — 零角速率更新（ZARU）
-- [x] InsOdo — 里程计辅助
-- [x] InsMagnetometer — 磁力计航向辅助
-- [x] InsStaticDetect — 静态检测（GLRT / MV / MAG / ARE / ODO 五种算法）
-- [x] InsRts — RTS 固定区间平滑
-- [x] InsFbs — 前向-后向平滑
-- [x] InsMath — 数学工具（矩阵运算、坐标变换、四元数、杆臂补偿 gapv2ipv）
-- [x] InsProviderImpl — InsProvider 契约完整实现
-
-### ignav-gnss 模块
-- [x] GnssProviderImpl — GnssProvider 契约完整实现
-- [x] SPP 单点定位（多系统支持）
-- [x] RTK 相对定位
-- [x] 紧组合观测构建（伪距/多普勒新息 + H/R 矩阵）
-- [x] RTCM 数据流解码
-- [x] RINEX 文件加载
-
-### ignav-fusion 模块
-- [x] IgnavFusion — 融合主编排器（LC/STC/TC/INS_ONLY 四模式）
-- [x] EkfFusion — EKF 融合引擎（含卡方检验、Joseph 形式协方差更新）
-- [x] buildLcObservation — LC 观测构建（含姿态误差 Jacobian + 杆臂补偿）
-- [x] buildStcObservation — STC 观测构建（含姿态/陀螺零偏 Jacobian + 杆臂补偿）
-- [x] tcUpdate — TC 独立更新逻辑（原始伪距/多普勒观测）
-- [x] jacobianPAtt / jacobianVAtt / jacobianVBg — 观测矩阵 Jacobian
-- [x] FusionConfig — 融合配置（自适应模式、反馈校正、卡方阈值等）
-- [x] FusionTimeProvider — IMU/GNSS 时间同步
-- [x] 自适应模式切换（滞回 + 冷却期 + GNSS 龄期检查）
-
-### ignav-app 模块
-- [x] IgnavApp — 应用入口（离线处理 / 实时输入 / Demo 模式）
-
 ## 待实现
 
 - [ ] 单元测试（各模块核心算法测试）
-- [ ] PPP 精密单点定位
-- [ ] 前向-后向平滑在融合层的集成
+- [ ] PPP 精密单点定位（GnssPositionSolution 已定义 PPP 状态码，但无解算实现）
+- [ ] 前向-后向平滑在融合层的集成（InsRts/InsFbs 已实现，但 IgnavFusion 未调用）
 - [ ] 实时流式接口（NTRIP、串口）
 - [ ] 配置文件加载（YAML/JSON）
 - [ ] 结果文件输出（NMEA、KML、自定义格式）
-- [ ] 可视化工具（轨迹显示、误差分析）
-- [ ] 杆臂补偿在线估计
-- [ ] 时间同步二阶模型（钟漂 + 钟漂率）
+- [ ] 杆臂补偿在线估计（当前杆臂为固定配置，未实现在线估计）
+- [ ] 时间同步二阶模型（当前 FusionTimeProvider 仅一阶偏差估计，无钟漂率估计）
 
 ---
 
