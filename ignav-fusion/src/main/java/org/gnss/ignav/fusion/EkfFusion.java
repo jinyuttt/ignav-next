@@ -172,13 +172,20 @@ public class EkfFusion {
     public void predict(double dt, double[] Qdiag) {
         if (!initialized) return;
 
+        DMatrixRMaj F = new DMatrixRMaj(nx, nx);
+        buildStateTransitionF(F, dt);
+
         DMatrixRMaj Phi = new DMatrixRMaj(nx, nx);
         CommonOps_DDRM.setIdentity(Phi);
 
         if (dt > 0 && dt < 1.0) {
-            for (int i = 0; i < 3; i++) {
-                Phi.set(i, 3 + i, dt);
-            }
+            DMatrixRMaj Fdt = new DMatrixRMaj(nx, nx);
+            DMatrixRMaj Fdt2 = new DMatrixRMaj(nx, nx);
+            CommonOps_DDRM.scale(dt, F, Fdt);
+            CommonOps_DDRM.mult(Fdt, Fdt, Fdt2);
+            CommonOps_DDRM.scale(0.5, Fdt2);
+            CommonOps_DDRM.addEquals(Phi, Fdt);
+            CommonOps_DDRM.addEquals(Phi, Fdt2);
         }
 
         DMatrixRMaj Q = new DMatrixRMaj(nx, nx);
@@ -203,6 +210,33 @@ public class EkfFusion {
 
         CommonOps_DDRM.addEquals(PhiPPhiT, Q);
         P.setTo(PhiPPhiT);
+    }
+
+    private void buildStateTransitionF(DMatrixRMaj F, double dt) {
+        F.zero();
+
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                F.set(i, 3 + j, 0.0);
+            }
+        }
+
+        for (int i = 0; i < 3; i++) {
+            F.set(3 + i, 6 + i, 1.0);
+        }
+
+        if (nx >= 15) {
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) {
+                    F.set(i, 12 + j, -1.0);
+                }
+            }
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) {
+                    F.set(3 + i, 9 + j, -1.0);
+                }
+            }
+        }
     }
 
     public void resetCovariance(double[] std) {

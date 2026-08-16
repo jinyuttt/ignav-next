@@ -235,6 +235,7 @@ public class IgnavFusion {
 
         int nx = config.getStateDimension();
         int nm = 3;
+        int IP = 6;
 
         double[] v = new double[nm];
         double[] H = new double[nm * nx];
@@ -244,9 +245,9 @@ public class IgnavFusion {
             v[i] = gnssSol.getPosEcef()[i] - insPred.getPosEcef()[i];
         }
 
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < nm; i++) {
             for (int j = 0; j < nx; j++) {
-                H[i * nx + j] = (j == i) ? 1.0 : 0.0;
+                H[i * nx + j] = (j == IP + i) ? -1.0 : 0.0;
             }
         }
 
@@ -270,6 +271,8 @@ public class IgnavFusion {
         int nx = config.getStateDimension();
         boolean hasVel = gnssSol.getVelEcef() != null && insPred.getVelEcef() != null;
         int nm = hasVel ? 6 : 3;
+        int IP = 6;
+        int IV = 3;
 
         double[] v = new double[nm];
         double[] H = new double[nm * nx];
@@ -281,7 +284,7 @@ public class IgnavFusion {
 
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j < nx; j++) {
-                H[i * nx + j] = (j == i) ? 1.0 : 0.0;
+                H[i * nx + j] = (j == IP + i) ? -1.0 : 0.0;
             }
         }
 
@@ -303,7 +306,7 @@ public class IgnavFusion {
 
             for (int i = 0; i < 3; i++) {
                 for (int j = 0; j < nx; j++) {
-                    H[(3 + i) * nx + j] = (j == 3 + i) ? 1.0 : 0.0;
+                    H[(3 + i) * nx + j] = (j == IV + i) ? -1.0 : 0.0;
                 }
             }
 
@@ -333,16 +336,19 @@ public class IgnavFusion {
             double bgPsd = insCfg.getBgPsd();
             double baPsd = insCfg.getBaPsd();
 
-            for (int i = 0; i < 3 && i < nx; i++) Qdiag[i] = acclPsd * acclPsd;
-            for (int i = 3; i < 6 && i < nx; i++) Qdiag[i] = gyroPsd * gyroPsd;
-            for (int i = 6; i < 9 && i < nx; i++) Qdiag[i] = bgPsd * bgPsd;
+            for (int i = 0; i < 3 && i < nx; i++) Qdiag[i] = gyroPsd * gyroPsd;
+            for (int i = 3; i < 6 && i < nx; i++) Qdiag[i] = acclPsd * acclPsd;
+            for (int i = 6; i < 9 && i < nx; i++) Qdiag[i] = 0.0;
             for (int i = 9; i < 12 && i < nx; i++) Qdiag[i] = baPsd * baPsd;
-            for (int i = 12; i < nx; i++) Qdiag[i] = 1e-10;
+            for (int i = 12; i < 15 && i < nx; i++) Qdiag[i] = bgPsd * bgPsd;
+            for (int i = 15; i < nx; i++) Qdiag[i] = 1e-10;
         } else {
             for (int i = 0; i < 3 && i < nx; i++) Qdiag[i] = 1e-2;
             for (int i = 3; i < 6 && i < nx; i++) Qdiag[i] = 1e-4;
-            for (int i = 6; i < 9 && i < nx; i++) Qdiag[i] = 1e-6;
-            for (int i = 9; i < nx; i++) Qdiag[i] = 1e-8;
+            for (int i = 6; i < 9 && i < nx; i++) Qdiag[i] = 0.0;
+            for (int i = 9; i < 12 && i < nx; i++) Qdiag[i] = 1e-6;
+            for (int i = 12; i < 15 && i < nx; i++) Qdiag[i] = 1e-6;
+            for (int i = 15; i < nx; i++) Qdiag[i] = 1e-10;
         }
 
         return Qdiag;
@@ -359,23 +365,23 @@ public class IgnavFusion {
         lastFusedSolution.setStatus(InsSolution.STATUS_NAVIGATING);
 
         double[] ekfState = ekf.getState();
-        if (ekfState != null && ekfState.length >= 6) {
+        if (ekfState != null && ekfState.length >= 9) {
             double[] pos = lastFusedSolution.getPosEcef();
             double[] vel = lastFusedSolution.getVelEcef();
             for (int i = 0; i < 3; i++) {
-                pos[i] += ekfState[i];
-                vel[i] += ekfState[3 + i];
+                pos[i] -= ekfState[6 + i];
+                vel[i] -= ekfState[3 + i];
             }
         }
 
         double[] ekfCov = ekf.getCovariance();
         int nx = ekf.getStateDimension();
-        if (ekfCov != null && nx >= 6) {
+        if (ekfCov != null && nx >= 9) {
             double[] posCov = lastFusedSolution.getPosCov();
             double[] velCov = lastFusedSolution.getVelCov();
             for (int i = 0; i < 3; i++) {
                 for (int j = 0; j < 3; j++) {
-                    posCov[i * 3 + j] = pred.getPosCov()[i * 3 + j] + ekfCov[i * nx + j];
+                    posCov[i * 3 + j] = pred.getPosCov()[i * 3 + j] + ekfCov[(6 + i) * nx + (6 + j)];
                     velCov[i * 3 + j] = pred.getVelCov()[i * 3 + j] + ekfCov[(3 + i) * nx + (3 + j)];
                 }
             }

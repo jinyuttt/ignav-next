@@ -88,40 +88,28 @@ public final class InsEkf {
         int IBG = InsStateIdx.xiBg(opt);
         int IBa = InsStateIdx.xiBa(opt);
 
-        double[] Ceb = new double[9];
-        InsMath.matt(Cbe, 3, 3, Ceb);
-
         double[] fe = new double[3];
         InsMath.matmul3v("N", Cbe, fb, fe);
 
-        double[] Sf = new double[9];
-        InsMath.skewsym3(fe, Sf);
-
-        for (i = 0; i < 9; i++) {
-            F[(IA) + (IV + i / 3) * nx] += Sf[i] * 0.0;
-        }
-
-        double[] Omg = InsMath.OMGE_MAT;
-        double[] SOmg = new double[9];
-        InsMath.skewsym3(new double[]{Omg[3], Omg[1], 0.0}, SOmg);
+        double[] negSf = new double[9];
+        InsMath.skewsym3(fe, negSf);
+        for (i = 0; i < 9; i++) negSf[i] = -negSf[i];
+        asiBlkMat(F, nx, nx, negSf, 3, 3, IA, IV);
 
         double[] I3 = InsMath.eye(3);
-        for (i = 0; i < 3; i++) {
-            F[(IV + i) + (IA + i) * nx] = 0.0;
-        }
+        asiBlkMat(F, nx, nx, I3, 3, 3, IV, IP);
 
         if (opt.bgopt != 0) {
-            double[] negCeb = new double[9];
-            for (i = 0; i < 9; i++) negCeb[i] = -Ceb[i];
-            for (i = 0; i < 9; i++) {
-                F[(IA + i % 3) + (IBG + i / 3) * nx] = negCeb[i];
-            }
+            double[] Ceb = new double[9];
+            InsMath.matt(Cbe, 3, 3, Ceb);
+            for (i = 0; i < 9; i++) Ceb[i] = -Ceb[i];
+            asiBlkMat(F, nx, nx, Ceb, 3, 3, IBG, IA);
         }
 
         if (opt.baopt != 0) {
-            for (i = 0; i < 9; i++) {
-                F[(IV + i % 3) + (IBa + i / 3) * nx] = -Cbe[i];
-            }
+            double[] negCbe = new double[9];
+            for (i = 0; i < 9; i++) negCbe[i] = -Cbe[i];
+            asiBlkMat(F, nx, nx, negCbe, 3, 3, IBa, IV);
         }
 
         double[] Phi = new double[nx * nx];
@@ -131,12 +119,20 @@ public final class InsEkf {
 
         for (i = 0; i < nx * nx; i++) Fdt[i] = F[i] * dt;
         InsMath.matmul("NN", nx, nx, nx, 1.0, Fdt, Fdt, 0.0, Fdt2);
-        for (i = 0; i < 2; i++) Fdt2[i] *= 0.5;
+        for (i = 0; i < nx * nx; i++) Fdt2[i] *= 0.5;
 
         for (i = 0; i < nx * nx; i++)
             Phi[i] = I[i] + Fdt[i] + 0.5 * Fdt2[i];
 
         InsMath.matcpy(ins.F, Phi, nx, nx);
+    }
+
+    private static void asiBlkMat(double[] A, int ra, int ca, double[] B, int rb, int cb, int rowOff, int colOff) {
+        for (int i = 0; i < rb; i++) {
+            for (int j = 0; j < cb; j++) {
+                A[(rowOff + i) + (colOff + j) * ra] += B[i + j * rb];
+            }
+        }
     }
 
     public static void predict(InsState ins, InsOpt opt, double dt) {
@@ -163,27 +159,38 @@ public final class InsEkf {
 
         for (i = 0; i < nx * nx; i++) Q[i] = 0.0;
 
+        int IA = InsStateIdx.xiA(opt);
+        int IV = InsStateIdx.xiV(opt);
+        int IP = InsStateIdx.xiP(opt);
         int IBG = InsStateIdx.xiBg(opt);
         int IBa = InsStateIdx.xiBa(opt);
         int ISG = InsStateIdx.xiSg(opt);
         int ISA = InsStateIdx.xiSa(opt);
+        int IRG = InsStateIdx.xiRg(opt);
+        int IRA = InsStateIdx.xiRa(opt);
+        int IDT = InsStateIdx.xiDt(opt);
+        int ILA = InsStateIdx.xiLever(opt);
+        int IOS = InsStateIdx.xiOs(opt);
+        int IOL = InsStateIdx.xiOl(opt);
+        int IOA = InsStateIdx.xiOa(opt);
 
-        double psdGyro = opt.psd.gyro;
-        double psdAccl = opt.psd.accl;
-        double psdBg = opt.psd.bg;
-        double psdBa = opt.psd.ba;
+        sysQ(IA, 3, nx, opt.psd.gyro, dt, Q);
+        sysQ(IV, 3, nx, opt.psd.accl, dt, Q);
+        if (opt.baopt != 0) sysQ(IBa, 3, nx, opt.psd.ba, dt, Q);
+        if (opt.bgopt != 0) sysQ(IBG, 3, nx, opt.psd.bg, dt, Q);
+        if (opt.estdt != 0) sysQ(IDT, InsStateIdx.xnDt(opt), nx, opt.psd.dt, dt, Q);
+        if (opt.estsg != 0) sysQ(ISG, InsStateIdx.xnSg(opt), nx, opt.psd.sg, dt, Q);
+        if (opt.estsa != 0) sysQ(ISA, InsStateIdx.xnSa(opt), nx, opt.psd.sa, dt, Q);
+        if (opt.estrg != 0) sysQ(IRG, InsStateIdx.xnRg(opt), nx, opt.psd.rg, dt, Q);
+        if (opt.estra != 0) sysQ(IRA, InsStateIdx.xnRa(opt), nx, opt.psd.ra, dt, Q);
+        if (opt.estlever != 0) sysQ(ILA, InsStateIdx.xnLever(opt), nx, opt.psd.ol, dt, Q);
+        if (opt.estodos != 0) sysQ(IOS, InsStateIdx.xnOs(opt), nx, opt.psd.os, dt, Q);
+        if (opt.estodol != 0) sysQ(IOL, InsStateIdx.xnOl(opt), nx, opt.psd.ol, dt, Q);
+        if (opt.estodoa != 0) sysQ(IOA, InsStateIdx.xnOa(opt), nx, opt.psd.oa, dt, Q);
+    }
 
-        int IA = InsStateIdx.xiA(opt);
-        int IV = InsStateIdx.xiV(opt);
-
-        for (i = 0; i < 3; i++) Q[(IA + i) + (IA + i) * nx] = psdGyro * dt;
-        for (i = 0; i < 3; i++) Q[(IV + i) + (IV + i) * nx] = psdAccl * dt;
-
-        if (opt.bgopt != 0) {
-            for (i = 0; i < 3; i++) Q[(IBG + i) + (IBG + i) * nx] = psdBg * dt;
-        }
-        if (opt.baopt != 0) {
-            for (i = 0; i < 3; i++) Q[(IBa + i) + (IBa + i) * nx] = psdBa * dt;
-        }
+    private static void sysQ(int is, int n, int nx, double v, double dt, double[] Q) {
+        for (int i = is; i < is + n; i++)
+            Q[i + i * nx] = v * Math.abs(dt);
     }
 }

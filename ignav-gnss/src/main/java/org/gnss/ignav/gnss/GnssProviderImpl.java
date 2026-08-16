@@ -165,8 +165,9 @@ public class GnssProviderImpl implements GnssProvider {
                 if (Math.abs(innov) > config.getMaxPositionInnovation()) continue;
 
                 vList.add(innov);
+                for (int j = 0; j < 6; j++) hList.add(0.0);
                 for (int j = 0; j < 3; j++) hList.add(-e[j]);
-                for (int j = 3; j < nx; j++) hList.add(0.0);
+                for (int j = 9; j < nx; j++) hList.add(0.0);
                 rList.add(config.getPosMeasurementNoise() * config.getPosMeasurementNoise() / (sinel * sinel));
                 nm++;
             }
@@ -180,7 +181,8 @@ public class GnssProviderImpl implements GnssProvider {
                 vList.add(doppler);
                 for (int j = 0; j < 3; j++) hList.add(0.0);
                 for (int j = 0; j < 3; j++) hList.add(-e[j]);
-                for (int j = 6; j < nx; j++) hList.add(0.0);
+                for (int j = 0; j < 3; j++) hList.add(0.0);
+                for (int j = 9; j < nx; j++) hList.add(0.0);
                 rList.add(config.getVelMeasurementNoise() * config.getVelMeasurementNoise());
                 nm++;
             }
