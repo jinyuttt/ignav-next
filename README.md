@@ -12,9 +12,9 @@ ignav-next 是一个模块化的 INS/GNSS 组合导航系统，核心设计原�
 ignav-next/
 ├── ignav-contract/     # 共享接口和数据类型
 ├── ignav-ins/          # INS 惯导模块
-├── ignav-gnss/         # GNSS 卫导模块（骨架）
-├── ignav-fusion/       # 融合层（骨架）
-└── ignav-app/          # 应用层（骨架）
+├── ignav-gnss/         # GNSS 卫导模块
+├── ignav-fusion/       # 融合层
+└── ignav-app/          # 应用层
 ```
 
 ### 模块依赖关系
@@ -34,6 +34,7 @@ ignav-app → ignav-fusion → ignav-contract ← ignav-ins
 | Java | 17 |
 | Maven | 3.9.x |
 | EJML | 0.43.1 |
+| rtklib-java | 2.0.5 |
 | SLF4J | 2.0.9 |
 | Logback | 1.4.8 |
 | JUnit | 5.9.2 |
@@ -277,6 +278,342 @@ INS 机械编排是系统的核心，实现导航状态的时间传播：
 
 ---
 
+## ignav-gnss — GNSS 卫导模块
+
+### 包结构
+
+```
+org.gnss.ignav.gnss/
+└── GnssProviderImpl.java   # GnssProvider 契约完整实现
+```
+
+### 核心功能
+
+`GnssProviderImpl` 是 GNSS 模块对 `GnssProvider` 接口的完整实现，基于 rtklib-java 库提供 GNSS 定位解算能力。
+
+#### 1. SPP 单点定位
+
+- 调用 `PntPos.pntpos()` 实现标准单点定位
+- 支持多系统（GPS/GLONASS/Galileo/BDS）
+- 高度角截止、GDOP 计算
+
+#### 2. RTK 相对定位
+
+- 调用 `RtkCore.rtkpos()` 实现实时动态定位
+- TC 模式下优先尝试 RTK，失败回退 SPP
+- 非 TC 模式直接使用 SPP
+
+#### 3. 紧组合观测构建
+
+`computeObservation()` 为紧组合模式构建 EKF 观测方程：
+
+```
+伪距新息:  v = P_obs - P_pred - CLIGHT·dts
+观测矩阵:  H = [-e, 0, 0, ...]  (方向矢量)
+多普勒新息: v = -f·(ṙ·e - v_ins·e) / CLIGHT
+观测矩阵:  H = [0, -e, 0, ...]  (速度方向矢量)
+噪声矩阵:  R = σ²/sin²(el)      (高度角加权)
+```
+
+- 基于 INS 预测位置计算卫星几何
+- 卫星位置通过 `EphModel.satpos()` 计算
+- 新息门限检验（`maxPositionInnovation`）
+
+#### 4. RTCM 数据流处理
+
+- 内置 `RtcmCallbackDecoder` 实时解码 RTCM 流
+- 自动接收星历（Eph/Geph）和 SSR 改正
+- 观测历元回调
+
+#### 5. RINEX 文件加载
+
+- `loadRinexObs()`：加载 RINEX 观测文件
+- `loadRinexNav()`：加载 RINEX 导航文件
+- 通过 `RinexParser` 解析
+
+#### 6. INS 预测辅助
+
+- `setInsPrediction()` 接收 INS 预测
+- 时间同步检查（`maxSyncTimeDiff`）
+- 辅助周跳探测和模糊度固定
+
+### 配置映射
+
+| GnssConfig 参数 | PrcOpt 映射 |
+|-----------------|-------------|
+| `fusionMode` | 决定 SPP/RTK 选择策略 |
+| `posMeasurementNoise` | 伪距观测噪声 |
+| `velMeasurementNoise` | 多普勒观测噪声 |
+| `minSatellitesForTc` | TC 模式最低卫星数 |
+
+### 健康监测
+
+```java
+健康状态判断:
+- NOMINAL:    有解 + 卫星数 ≥ 6 + GNSS 数据新鲜
+- GNSS_DEGRADED: 有解 + 卫星数 < 6 或 GDOP > 10
+- GNSS_ONLY:  INS 未提供
+- FAILED:     无解或 GNSS 数据超时（> 30s）
+```
+
+---
+
+## ignav-fusion — 融合层
+
+### 包结构
+
+```
+org.gnss.ignav.fusion/
+├── IgnavFusion.java        # 融合主编排器
+├── EkfFusion.java          # EKF 融合引擎
+├── FusionConfig.java       # 融合层配置
+└── FusionTimeProvider.java # 时间同步实现
+```
+
+### IgnavFusion — 融合主编排器
+
+`IgnavFusion` 是整个系统的核心协调器，管理 INS/GNSS 双向数据流和融合模式切换。
+
+#### 初始化流程
+
+```
+init(InsConfig, GnssConfig)
+  ├→ insProvider.configure(insConfig)
+  ├→ gnssProvider.configure(gnssConfig)
+  ├→ insProvider.setTimeProvider(timeProvider)
+  ├→ gnssProvider.setTimeProvider(timeProvider)
+  └→ ekf.init(stateDim, initState, initCov)
+```
+
+#### IMU 处理流程
+
+```
+processImu(ImuMeasurement)
+  ├→ timeProvider.feedImuTime(imu.time)
+  ├→ insProvider.timeUpdate(imu)
+  ├→ lastInsSolution = insProvider.getSolution()
+  └→ gnssProvider.setInsPrediction(insProvider.getPrediction())
+```
+
+#### GNSS 处理流程
+
+```
+processGnss()
+  ├→ timeProvider.feedGnssTime(gnssTime)
+  ├→ gnssProvider.solvePosition()
+  ├→ 自适应模式切换 checkAdaptiveMode()
+  ├→ 根据模式执行 EKF 更新:
+  │   ├→ LC:  lcUpdate()   — 位置/速度观测
+  │   ├→ STC: stcUpdate()  — 位置/速度 + 部分观测
+  │   └→ TC:  tcUpdate()   — 原始伪距/多普勒观测
+  ├→ 反馈校正 (可选): insProvider.applyCorrection(dx, dP)
+  └→ 更新 lastFusedSolution
+```
+
+#### 自适应模式切换
+
+```
+卫星数/GDOP 判断:
+  sats < 2              → INS_ONLY
+  sats ≥ 2, GDOP < 20   → LC
+  sats ≥ 4, GDOP < 6    → STC
+  sats ≥ 6, GDOP < 3    → TC
+
+保护机制:
+  - 滞回计数: 在当前模式保持 epochHold 个历元后才允许切换
+  - 冷却期: 切换后 cooldown 个历元内不再切换
+  - GNSS 数据龄期检查: 超龄自动降级
+```
+
+#### INS 协方差重置
+
+当 INS 协方差迹超过阈值（`maxInsCovForReset`）时：
+1. 从 GNSS 解重新初始化 INS 状态
+2. 重置 EKF 状态和协方差
+3. 日志记录重置事件
+
+### EkfFusion — EKF 融合引擎
+
+独立的扩展卡尔曼滤波器，支持多种观测更新模式。
+
+#### 状态向量
+
+```
+x = [δφ(3), δv(3), δr(3), ∇(3), ε(3)]ᵀ   (15 维)
+     姿态   速度   位置  加计零偏 陀螺零偏
+```
+
+可通过 `stateDimension` 扩展至 18/21/24 维（含标度因数、非正交等）。
+
+#### 预测
+
+```
+P ← Φ·P·Φᵀ + Q
+```
+
+- Φ: 状态转移矩阵（由 INS EKF 提供）
+- Q: 过程噪声矩阵（由 INS EKF 提供）
+
+#### LC 松组合更新
+
+```
+观测: z = [pos_gnss - pos_ins, vel_gnss - vel_ins]ᵀ
+H = [0₃ₓ₃  0₃ₓ₃  I₃ₓ₃  0₃ₓ₃  0₃ₓ₃]    (位置)
+    [0₃ₓ₃  I₃ₓ₃  0₃ₓ₃  0₃ₓ₃  0₃ₓ₃]    (速度)
+
+S = H·P·Hᵀ + R
+K = P·Hᵀ·S⁻¹
+x ← x + K·(z - H·x)
+P ← (I - K·H)·P·(I - K·H)ᵀ + K·R·Kᵀ   (Joseph 形式)
+```
+
+- S 矩阵求逆使用 `CommonOps_DDRM.invert()`
+- 新息检验: `vᵀ·S⁻¹·v < chi2Threshold × nm`
+
+#### TC 紧组合更新
+
+```
+观测: 来自 GnssProvider.computeObservation()
+  v: 新息向量 (伪距 + 多普勒)
+  H: 观测矩阵
+  R: 噪声协方差 (对角阵)
+
+更新公式同 LC，但维度由卫星数决定
+```
+
+#### STC 半紧组合更新
+
+```
+先执行 LC 位置/速度更新
+再追加 TC 部分观测更新（可选）
+```
+
+#### 卡方检验
+
+每次更新后计算新息比 `vᵀ·S⁻¹·v / nm`，超过阈值则拒绝本次更新，防止粗差污染。
+
+### FusionConfig — 融合配置
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `insConfig` | 默认 InsConfig | INS 配置 |
+| `gnssConfig` | 默认 GnssConfig | GNSS 配置 |
+| `fusionMode` | LC | 初始融合模式 |
+| `maxInsCovForReset` | 1e8 | INS 协方差重置阈值 |
+| `maxGnssAgeForLc` | 30.0s | LC 模式最大 GNSS 数据龄期 |
+| `maxGnssAgeForStc` | 10.0s | STC 模式最大 GNSS 数据龄期 |
+| `maxGnssAgeForTc` | 5.0s | TC 模式最大 GNSS 数据龄期 |
+| `enableAdaptiveMode` | true | 启用自适应模式切换 |
+| `enableFeedbackCorrection` | true | 启用反馈校正 |
+| `enableSmoothing` | false | 启用平滑（预留） |
+| `chi2Threshold` | 0.01 | 卡方检验阈值 |
+| `stateDimension` | 15 | EKF 状态维度 |
+
+### FusionTimeProvider — 时间同步
+
+实现 `TimeProvider` 接口，负责 IMU/GNSS 时间同步。
+
+#### 时间同步策略
+
+```
+1. IMU 时间驱动系统时间（高频 100Hz+）
+2. GNSS 时间校准系统时间（低频 1Hz）
+3. 当 GNSS 时间有效时，计算 IMU-GNSS 时间偏差
+4. 时间偏差估计: bias = t_gnss - t_imu（一阶近似）
+5. 时钟漂移跟踪: 通过连续观测估计漂移率
+```
+
+#### 关键方法
+
+| 方法 | 说明 |
+|------|------|
+| `feedImuTime(GTime)` | 输入 IMU 时间戳，更新系统时间和漂移 |
+| `feedGnssTime(GTime)` | 输入 GNSS 时间戳，校准系统时间 |
+| `imuToSystem(GTime)` | IMU 时间 → 系统时间（补偿偏差） |
+| `gnssToSystem(GTime)` | GNSS 时间 → 系统时间（补偿偏差） |
+| `setTimeBias(double)` | 设置时间偏差（融合层估计） |
+| `getTimeBias()` | 获取当前时间偏差 |
+| `getImuTimeDrift()` | IMU 时钟漂移率 |
+| `getGnssTimeDrift()` | GNSS 时钟漂移率 |
+
+---
+
+## ignav-app — 应用层
+
+### 包结构
+
+```
+org.gnss.ignav.app/
+└── IgnavApp.java   # 应用入口
+```
+
+### IgnavApp — 应用入口
+
+`IgnavApp` 是系统的顶层入口，封装了初始化、数据输入和处理流程。
+
+#### 运行模式
+
+| 模式 | 说明 |
+|------|------|
+| 离线处理 | 从文件加载 IMU/GNSS 数据，顺序处理 |
+| 实时输入 | 通过 `feedImu()` / `feedGnss()` 接口逐历元输入 |
+| Demo 模式 | 无参数运行时自动生成模拟数据演示 |
+
+#### 离线处理流程
+
+```
+runOffline(imuFile, gnssObsFile, gnssNavFile)
+  ├→ loadImuFile()           # 解析 IMU 文件 (week tow gyro_x gyro_y gyro_z accl_x accl_y accl_z)
+  ├→ loadGnssObs()           # 加载 GNSS 观测文件 (RINEX)
+  ├→ loadGnssNav()           # 加载 GNSS 导航文件 (RINEX)
+  └→ 循环处理:
+      ├→ feedImu(imu)        # 每 IMU 历元
+      └→ feedGnss()          # 每 5 个 IMU 历元一次
+```
+
+#### Demo 模式
+
+无命令行参数时自动运行 Demo：
+- 生成 1000 个模拟 IMU 历元（dt=0.01s，含正弦陀螺 + 静态加速度计）
+- 每 5 个 IMU 历元触发一次 GNSS 更新
+- 初始位置设为 ECEF 坐标
+
+#### 默认配置工厂
+
+| 方法 | 说明 |
+|------|------|
+| `createDefaultInsConfig()` | 15 维 EKF，估计 bg/ba，启用 ZVU |
+| `createDefaultGnssConfig()` | LC 模式，posNoise=2.5m，velNoise=0.1m/s |
+| `createDefaultFusionConfig()` | 自适应模式，反馈校正，15 维状态 |
+
+#### 命令行用法
+
+```bash
+# 离线处理
+java -jar ignav-app.jar <imu_file> <gnss_obs_file> <gnss_nav_file>
+
+# Demo 模式
+java -jar ignav-app.jar
+```
+
+#### IMU 文件格式
+
+```
+# 注释行以 # 或 % 开头
+week tow gyro_x gyro_y gyro_z accl_x accl_y accl_z
+2300 432000.000 0.0001 -0.00005 0.00003 0.01 0.02 9.81
+2300 432000.010 0.0002 -0.00004 0.00002 0.01 0.02 9.80
+```
+
+#### SolutionLogger
+
+内部日志类，每 10 个 GNSS 历元输出一次融合结果：
+```
+SOL: t=2300/432000.000 pos=[-2674691.0000,3745950.0000,4499760.0000] vel=[0.000000,0.000000,0.000000] mode=LC sats=8 health=NOMINAL
+```
+
+---
+
 ## 数据流
 
 ### 正常导航流程
@@ -289,11 +626,13 @@ IMU 数据 → InsProvider.timeUpdate()
               ├→ InsNhc/Zvu/Zaru/Odo     # 辅助约束
               └→ 更新 InsState
 
-InsProvider.getPrediction() → 融合层
+InsProvider.getPrediction() → IgnavFusion → GnssProvider.setInsPrediction()
 
 GNSS 数据 → GnssProvider.solvePosition() / computeObservation()
               ↓
-融合层 EKF 更新 → StateCorrection(dx, dP) → InsProvider.applyCorrection()
+IgnavFusion → EkfFusion.update() → StateCorrection(dx, dP)
+              ↓
+InsProvider.applyCorrection()  (反馈校正，可选)
 ```
 
 ### 融合模式数据流
@@ -303,6 +642,31 @@ LC (松组合):  GNSS 位置/速度 ←→ INS 位置/速度
 STC (半紧组合): GNSS 位置/速度 + 部分观测 ←→ INS
 TC (紧组合):  GNSS 原始观测(伪距/载波) ←→ INS 预测位置
 INS_ONLY:    纯 INS 递推，无外部修正
+```
+
+### 完整系统数据流
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │              IgnavFusion                │
+                    │                                         │
+  IMU ──→ processImu() ──→ InsProvider ──→ getPrediction()  │
+                               │              │               │
+                          timeUpdate()   setInsPrediction()   │
+                               │              │               │
+                               ▼              ▼               │
+                          InsSolution    GnssProvider         │
+                                           │     │            │
+                                     solvePos() computeObs() │
+                                           │     │            │
+                                           ▼     ▼            │
+  GNSS ──→ processGnss() ──→ EkfFusion.update()              │
+                                    │                         │
+                          applyCorrection() ←── StateCorrection
+                                    │                         │
+                                    ▼                         │
+                              FusedSolution                   │
+                    └─────────────────────────────────────────┘
 ```
 
 ---
@@ -336,21 +700,35 @@ INS_ONLY:    纯 INS 递推，无外部修正
 |------|------|
 | ignav-contract | 无（纯接口 + 数据类） |
 | ignav-ins | ignav-contract, ejml-all, slf4j-api |
-| ignav-gnss | ignav-contract, ejml-all, slf4j-api |
-| ignav-fusion | ignav-contract, ignav-ins, ignav-gnss, slf4j-api |
+| ignav-gnss | ignav-contract, rtklib-java, ejml-all, slf4j-api |
+| ignav-fusion | ignav-contract, ignav-ins, ignav-gnss, ejml-all, slf4j-api |
 | ignav-app | ignav-fusion, logback-classic |
 
 ---
 
+## 已实现
+
+- [x] ignav-contract 模块（共享接口和数据类型）
+- [x] ignav-ins 模块（机械编排、EKF、辅助约束、平滑）
+- [x] ignav-gnss 模块（SPP/RTK、RTCM、RINEX、紧组合观测构建）
+- [x] ignav-fusion 模块（LC/STC/TC 融合引擎、自适应模式切换、时间同步）
+- [x] ignav-app 模块（离线处理、Demo 模式、默认配置工厂）
+- [x] GnssProviderImpl 实现
+- [x] IgnavFusion 融合编排器
+- [x] EkfFusion EKF 融合引擎
+- [x] FusionTimeProvider 时间同步
+
 ## 待实现
 
-- [ ] ignav-gnss 模块实现（GNSS 数据处理、SPP/RTK/PPP）
-- [ ] ignav-fusion 模块实现（LC/STC/TC 融合引擎）
-- [ ] ignav-app 模块实现（配置加载、数据流驱动、结果输出）
-- [ ] GnssProviderImpl 实现
-- [ ] FusionEngine 实现（含 TimeProvider 和自适应模式切换）
-- [ ] 单元测试
-- [ ] 数据文件 I/O（RINEX、NMEA、结果文件）
+- [ ] 单元测试（各模块核心算法测试）
+- [ ] PPP 精密单点定位
+- [ ] 前向-后向平滑在融合层的集成
+- [ ] 实时流式接口（NTRIP、串口）
+- [ ] 配置文件加载（YAML/JSON）
+- [ ] 结果文件输出（NMEA、KML、自定义格式）
+- [ ] 可视化工具（轨迹显示、误差分析）
+- [ ] 杆臂补偿在线估计
+- [ ] 时间同步二阶模型（钟漂 + 钟漂率）
 
 ---
 
