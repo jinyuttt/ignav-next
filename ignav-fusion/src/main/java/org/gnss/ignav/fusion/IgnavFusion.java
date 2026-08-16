@@ -17,6 +17,9 @@ import org.gnss.ignav.contract.TimeProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class IgnavFusion {
 
     private static final double OMGE = 7.2921151467e-5;
@@ -40,6 +43,11 @@ public class IgnavFusion {
     private GTime lastGnssTime;
     private GTime lastFusionTime;
 
+    private List<InsSolution> forwardSolutions;
+    private List<InsSolution> smoothedSolutions;
+    private boolean smoothingEnabled;
+    private int smoothingMaxEpochs;
+
     public IgnavFusion(GnssProvider gnssProvider, InsProvider insProvider, FusionConfig config) {
         this.gnssProvider = gnssProvider;
         this.insProvider = insProvider;
@@ -59,6 +67,11 @@ public class IgnavFusion {
 
         this.gnssProvider.setTimeProvider(timeProvider);
         this.insProvider.setTimeProvider(timeProvider);
+
+        this.forwardSolutions = new ArrayList<>();
+        this.smoothedSolutions = new ArrayList<>();
+        this.smoothingEnabled = false;
+        this.smoothingMaxEpochs = 100000;
     }
 
     public void init(InsConfig insConfig, GnssConfig gnssConfig) {
@@ -75,9 +88,13 @@ public class IgnavFusion {
 
         ekf.init(config.getStateDimension(), null, null);
 
+        smoothingEnabled = config.isEnableSmoothing();
+        forwardSolutions.clear();
+        smoothedSolutions.clear();
+
         initialized = true;
-        logger.info("IgnavFusion initialized: mode={}, nx={}",
-            config.getFusionMode().getMode(), config.getStateDimension());
+        logger.info("IgnavFusion initialized: mode={}, nx={}, smoothing={}",
+            config.getFusionMode().getMode(), config.getStateDimension(), smoothingEnabled);
     }
 
     public void processImu(ImuMeasurement imu) {
@@ -498,6 +515,10 @@ public class IgnavFusion {
                 }
             }
         }
+
+        if (smoothingEnabled) {
+            saveForwardSolution();
+        }
     }
 
     private void computeFusedFromIns() {
@@ -618,6 +639,8 @@ public class IgnavFusion {
         lastGnssTime = new GTime();
         lastFusionTime = new GTime();
         lastFusedSolution = new InsSolution();
+        forwardSolutions.clear();
+        smoothedSolutions.clear();
         logger.info("IgnavFusion reset");
     }
 
@@ -677,5 +700,269 @@ public class IgnavFusion {
         M[0] = 0.0;  M[1] = -a[2]; M[2] = a[1];
         M[3] = a[2]; M[4] = 0.0;   M[5] = -a[0];
         M[6] = -a[1]; M[7] = a[0]; M[8] = 0.0;
+    }
+
+    private void saveForwardSolution() {
+        InsSolution snapshot = new InsSolution();
+        snapshot.setTime(lastFusedSolution.getTime());
+        snapshot.setPosEcef(lastFusedSolution.getPosEcef().clone());
+        snapshot.setVelEcef(lastFusedSolution.getVelEcef().clone());
+        snapshot.setAttQuat(lastFusedSolution.getAttQuat().clone());
+        snapshot.setPosCov(lastFusedSolution.getPosCov().clone());
+        snapshot.setVelCov(lastFusedSolution.getVelCov().clone());
+        snapshot.setAttCov(lastFusedSolution.getAttCov().clone());
+        snapshot.setStatus(lastFusedSolution.getStatus());
+
+        forwardSolutions.add(snapshot);
+        if (forwardSolutions.size() > smoothingMaxEpochs) {
+            forwardSolutions.remove(0);
+        }
+    }
+
+    public List<InsSolution> applyRtsSmoothing() {
+        if (!smoothingEnabled || forwardSolutions.isEmpty()) {
+            logger.warn("RTS smoothing: no forward solutions available");
+            return new ArrayList<>();
+        }
+
+        int n = forwardSolutions.size();
+        smoothedSolutions.clear();
+
+        double[][] posCovFwd = new double[n][9];
+        double[][] velCovFwd = new double[n][9];
+        double[][] attCovFwd = new double[n][9];
+        double[][] posCovSmooth = new double[n][9];
+        double[][] velCovSmooth = new double[n][9];
+        double[][] attCovSmooth = new double[n][9];
+        double[][] posSmooth = new double[n][3];
+        double[][] velSmooth = new double[n][3];
+        double[][] attSmooth = new double[n][4];
+
+        for (int i = 0; i < n; i++) {
+            InsSolution sol = forwardSolutions.get(i);
+            System.arraycopy(sol.getPosCov(), 0, posCovFwd[i], 0, 9);
+            System.arraycopy(sol.getVelCov(), 0, velCovFwd[i], 0, 9);
+            System.arraycopy(sol.getAttCov(), 0, attCovFwd[i], 0, 9);
+            System.arraycopy(sol.getPosEcef(), 0, posSmooth[i], 0, 3);
+            System.arraycopy(sol.getVelEcef(), 0, velSmooth[i], 0, 3);
+            System.arraycopy(sol.getAttQuat(), 0, attSmooth[i], 0, 4);
+        }
+
+        System.arraycopy(posCovFwd[n - 1], 0, posCovSmooth[n - 1], 0, 9);
+        System.arraycopy(velCovFwd[n - 1], 0, velCovSmooth[n - 1], 0, 9);
+        System.arraycopy(attCovFwd[n - 1], 0, attCovSmooth[n - 1], 0, 9);
+
+        double qPos = 0.01;
+        double qVel = 0.001;
+        double qAtt = 0.0001;
+
+        for (int k = n - 2; k >= 0; k--) {
+            double[] Pk = posCovFwd[k];
+            double[] Pk1 = posCovSmooth[k + 1];
+            double[] PkPred = new double[9];
+            for (int i = 0; i < 9; i++) PkPred[i] = Pk[i] + (i % 4 == 0 ? qPos : 0);
+
+            double[] Ck = new double[9];
+            matMul9(Pk, PkPred, Ck);
+            double[] PkPredInv = new double[9];
+            matInv3(PkPred, PkPredInv);
+            double[] CkFinal = new double[9];
+            matMul9(Ck, PkPredInv, CkFinal);
+            posCovSmooth[k] = new double[9];
+            matAddSub3(Pk, CkFinal, Pk1, posCovSmooth[k]);
+
+            for (int i = 0; i < 3; i++) {
+                double dx = posSmooth[k + 1][i] - posSmooth[k][i];
+                for (int j = 0; j < 3; j++) {
+                    posSmooth[k][i] += CkFinal[i * 3 + j] * dx;
+                }
+            }
+
+            Pk = velCovFwd[k];
+            Pk1 = velCovSmooth[k + 1];
+            for (int i = 0; i < 9; i++) PkPred[i] = Pk[i] + (i % 4 == 0 ? qVel : 0);
+            matMul9(Pk, PkPred, Ck);
+            matInv3(PkPred, PkPredInv);
+            matMul9(Ck, PkPredInv, CkFinal);
+            velCovSmooth[k] = new double[9];
+            matAddSub3(Pk, CkFinal, Pk1, velCovSmooth[k]);
+
+            for (int i = 0; i < 3; i++) {
+                double dx = velSmooth[k + 1][i] - velSmooth[k][i];
+                for (int j = 0; j < 3; j++) {
+                    velSmooth[k][i] += CkFinal[i * 3 + j] * dx;
+                }
+            }
+
+            Pk = attCovFwd[k];
+            Pk1 = attCovSmooth[k + 1];
+            for (int i = 0; i < 9; i++) PkPred[i] = Pk[i] + (i % 4 == 0 ? qAtt : 0);
+            matMul9(Pk, PkPred, Ck);
+            matInv3(PkPred, PkPredInv);
+            matMul9(Ck, PkPredInv, CkFinal);
+            attCovSmooth[k] = new double[9];
+            matAddSub3(Pk, CkFinal, Pk1, attCovSmooth[k]);
+        }
+
+        for (int i = 0; i < n; i++) {
+            InsSolution smoothSol = new InsSolution();
+            smoothSol.setTime(forwardSolutions.get(i).getTime());
+            smoothSol.setPosEcef(posSmooth[i]);
+            smoothSol.setVelEcef(velSmooth[i]);
+            smoothSol.setAttQuat(attSmooth[i]);
+            smoothSol.setPosCov(posCovSmooth[i]);
+            smoothSol.setVelCov(velCovSmooth[i]);
+            smoothSol.setAttCov(attCovSmooth[i]);
+            smoothSol.setStatus(forwardSolutions.get(i).getStatus());
+            smoothedSolutions.add(smoothSol);
+        }
+
+        logger.info("RTS smoothing completed: {} epochs processed", n);
+        return new ArrayList<>(smoothedSolutions);
+    }
+
+    public List<InsSolution> applyFbsSmoothing(List<InsSolution> backwardSolutions) {
+        if (!smoothingEnabled || forwardSolutions.isEmpty() || backwardSolutions == null || backwardSolutions.isEmpty()) {
+            logger.warn("FBS smoothing: forward={}, backward={}", forwardSolutions.size(),
+                backwardSolutions != null ? backwardSolutions.size() : 0);
+            return new ArrayList<>();
+        }
+
+        int n = Math.min(forwardSolutions.size(), backwardSolutions.size());
+        smoothedSolutions.clear();
+
+        for (int i = 0; i < n; i++) {
+            InsSolution fwd = forwardSolutions.get(i);
+            InsSolution bwd = backwardSolutions.get(n - 1 - i);
+
+            double[] Pf = fwd.getPosCov();
+            double[] Pb = bwd.getPosCov();
+            double[] PfInv = new double[9];
+            double[] PbInv = new double[9];
+            matInv3(Pf, PfInv);
+            matInv3(Pb, PbInv);
+            double[] Ps = new double[9];
+            for (int j = 0; j < 9; j++) Ps[j] = PfInv[j] + PbInv[j];
+            double[] PsInv = new double[9];
+            matInv3(Ps, PsInv);
+
+            double[] posF = fwd.getPosEcef();
+            double[] posB = bwd.getPosEcef();
+            double[] PfPosF = new double[3];
+            double[] PbPosB = new double[3];
+            matVec3(PfInv, posF, PfPosF);
+            matVec3(PbInv, posB, PbPosB);
+            double[] posSmooth = new double[3];
+            for (int j = 0; j < 3; j++) PfPosF[j] += PbPosB[j];
+            matVec3(PsInv, PfPosF, posSmooth);
+
+            double[] Vf = fwd.getVelCov();
+            double[] Vb = bwd.getVelCov();
+            double[] VfInv = new double[9];
+            double[] VbInv = new double[9];
+            matInv3(Vf, VfInv);
+            matInv3(Vb, VbInv);
+            double[] Vs = new double[9];
+            for (int j = 0; j < 9; j++) Vs[j] = VfInv[j] + VbInv[j];
+            double[] VsInv = new double[9];
+            matInv3(Vs, VsInv);
+
+            double[] velF = fwd.getVelEcef();
+            double[] velB = bwd.getVelEcef();
+            double[] VfVelF = new double[3];
+            double[] VbVelB = new double[3];
+            matVec3(VfInv, velF, VfVelF);
+            matVec3(VbInv, velB, VbVelB);
+            double[] velSmooth = new double[3];
+            for (int j = 0; j < 3; j++) VfVelF[j] += VbVelB[j];
+            matVec3(VsInv, VfVelF, velSmooth);
+
+            InsSolution smoothSol = new InsSolution();
+            smoothSol.setTime(fwd.getTime());
+            smoothSol.setPosEcef(posSmooth);
+            smoothSol.setVelEcef(velSmooth);
+            smoothSol.setAttQuat(fwd.getAttQuat().clone());
+            smoothSol.setPosCov(PsInv);
+            smoothSol.setVelCov(VsInv);
+            smoothSol.setAttCov(fwd.getAttCov().clone());
+            smoothSol.setStatus(fwd.getStatus());
+            smoothedSolutions.add(smoothSol);
+        }
+
+        logger.info("FBS smoothing completed: {} epochs processed", n);
+        return new ArrayList<>(smoothedSolutions);
+    }
+
+    private static void matMul9(double[] A, double[] B, double[] C) {
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                C[i * 3 + j] = 0;
+                for (int k = 0; k < 3; k++) {
+                    C[i * 3 + j] += A[i * 3 + k] * B[k * 3 + j];
+                }
+            }
+        }
+    }
+
+    private static void matInv3(double[] M, double[] Minv) {
+        double a11 = M[0], a12 = M[1], a13 = M[2];
+        double a21 = M[3], a22 = M[4], a23 = M[5];
+        double a31 = M[6], a32 = M[7], a33 = M[8];
+        double det = a11 * (a22 * a33 - a23 * a32)
+                   - a12 * (a21 * a33 - a23 * a31)
+                   + a13 * (a21 * a32 - a22 * a31);
+        if (Math.abs(det) < 1e-30) {
+            for (int i = 0; i < 9; i++) Minv[i] = (i % 4 == 0) ? 1.0 : 0.0;
+            return;
+        }
+        double invDet = 1.0 / det;
+        Minv[0] = (a22 * a33 - a23 * a32) * invDet;
+        Minv[1] = (a13 * a32 - a12 * a33) * invDet;
+        Minv[2] = (a12 * a23 - a13 * a22) * invDet;
+        Minv[3] = (a23 * a31 - a21 * a33) * invDet;
+        Minv[4] = (a11 * a33 - a13 * a31) * invDet;
+        Minv[5] = (a21 * a12 - a11 * a22) * invDet;
+        Minv[6] = (a21 * a32 - a22 * a31) * invDet;
+        Minv[7] = (a12 * a31 - a11 * a32) * invDet;
+        Minv[8] = (a11 * a22 - a12 * a21) * invDet;
+    }
+
+    private static void matAddSub3(double[] A, double[] B, double[] C, double[] out) {
+        for (int i = 0; i < 9; i++) {
+            out[i] = A[i] + B[i] * C[i];
+        }
+    }
+
+    private static void matVec3(double[] M, double[] v, double[] out) {
+        for (int i = 0; i < 3; i++) {
+            out[i] = 0;
+            for (int j = 0; j < 3; j++) {
+                out[i] += M[i * 3 + j] * v[j];
+            }
+        }
+    }
+
+    public List<InsSolution> getForwardSolutions() {
+        return new ArrayList<>(forwardSolutions);
+    }
+
+    public List<InsSolution> getSmoothedSolutions() {
+        return new ArrayList<>(smoothedSolutions);
+    }
+
+    public int getForwardSolutionCount() {
+        return forwardSolutions.size();
+    }
+
+    public void enableSmoothing(boolean enabled) {
+        this.smoothingEnabled = enabled;
+        if (!enabled) {
+            forwardSolutions.clear();
+            smoothedSolutions.clear();
+        }
+    }
+
+    public void setSmoothingMaxEpochs(int max) {
+        this.smoothingMaxEpochs = max;
     }
 }

@@ -20,6 +20,12 @@ public class FusionTimeProvider implements TimeProvider {
     private int gnssCount;
     private boolean gnssTimeValid;
 
+    private boolean secondOrderModel;
+    private double timeDriftRate;
+    private double lastBiasEstimate;
+    private double biasAlpha;
+    private double driftAlpha;
+
     public FusionTimeProvider() {
         this.systemTime = new GTime();
         this.imuTimeBias = 0.0;
@@ -31,6 +37,11 @@ public class FusionTimeProvider implements TimeProvider {
         this.imuCount = 0;
         this.gnssCount = 0;
         this.gnssTimeValid = false;
+        this.secondOrderModel = false;
+        this.timeDriftRate = 0.0;
+        this.lastBiasEstimate = 0.0;
+        this.biasAlpha = 0.05;
+        this.driftAlpha = 0.01;
     }
 
     public void feedImuTime(GTime imuTime) {
@@ -72,7 +83,17 @@ public class FusionTimeProvider implements TimeProvider {
             gnssTimeValid = true;
         } else {
             double bias = gnssTime.diff(systemTime);
-            imuTimeBias = imuTimeBias * 0.95 + bias * 0.05;
+            if (secondOrderModel) {
+                double prevBias = lastBiasEstimate;
+                imuTimeBias = imuTimeBias * (1.0 - biasAlpha) + bias * biasAlpha;
+                if (Math.abs(prevBias) > 1e-12) {
+                    double instDriftRate = (imuTimeBias - prevBias) / gnssTimeDrift;
+                    timeDriftRate = timeDriftRate * (1.0 - driftAlpha) + instDriftRate * driftAlpha;
+                }
+                lastBiasEstimate = imuTimeBias;
+            } else {
+                imuTimeBias = imuTimeBias * 0.95 + bias * 0.05;
+            }
         }
 
         gnssCount++;
@@ -88,6 +109,12 @@ public class FusionTimeProvider implements TimeProvider {
         if (imuTime == null) return new GTime();
         GTime result = new GTime(imuTime);
         result.sec += imuTimeBias;
+        if (secondOrderModel && imuCount > 0) {
+            double dt = imuTime.diff(lastImuTime);
+            if (dt > 0 && dt < 1.0) {
+                result.sec += timeDriftRate * dt;
+            }
+        }
         normalize(result);
         return result;
     }
@@ -120,6 +147,29 @@ public class FusionTimeProvider implements TimeProvider {
     @Override
     public double getGnssTimeDrift() {
         return gnssTimeDrift;
+    }
+
+    @Override
+    public double getTimeDriftRate() {
+        return timeDriftRate;
+    }
+
+    @Override
+    public void setTimeDriftRate(double rate) {
+        this.timeDriftRate = rate;
+    }
+
+    @Override
+    public boolean isSecondOrderModel() {
+        return secondOrderModel;
+    }
+
+    @Override
+    public void setSecondOrderModel(boolean enabled) {
+        this.secondOrderModel = enabled;
+        if (enabled) {
+            logger.info("Time sync second-order model enabled (clock drift rate estimation)");
+        }
     }
 
     public boolean isGnssTimeValid() {

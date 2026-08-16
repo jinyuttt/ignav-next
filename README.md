@@ -433,7 +433,28 @@ processGnss()
   │   ├→ STC: stcUpdate()  — 位置/速度 + 部分观测
   │   └→ TC:  tcUpdate()   — 原始伪距/多普勒观测
   ├→ 反馈校正 (可选): insProvider.applyCorrection(dx, dP)
-  └→ 更新 lastFusedSolution
+  ├→ 更新 lastFusedSolution
+  └→ 保存前向解 (平滑启用时): saveForwardSolution()
+```
+
+#### 平滑处理
+
+当 `FusionConfig.enableSmoothing = true` 时，融合层自动收集前向滤波解。数据处理完成后可调用：
+
+- **RTS 平滑** `applyRtsSmoothing()`：基于前向解执行 Rauch-Tung-Striebel 固定区间平滑，对位置/速度/姿态分别进行 3×3 协方差子块的 RTS 递推
+- **FBS 平滑** `applyFbsSmoothing(backwardSolutions)`：前向-后向平滑，需要提供反向滤波结果，通过协方差逆加权融合前向和后向估计
+
+```
+RTS 平滑流程:
+  1. 前向解收集: 每个 GNSS 历元保存 InsSolution 快照
+  2. 反向递推: 从最后一个历元开始，计算平滑增益 Ck = Pk * Pk_pred^(-1)
+  3. 状态更新: x_smooth(k) = x(k) + Ck * (x_smooth(k+1) - x(k))
+  4. 协方差更新: P_smooth(k) = P(k) + Ck * (P_smooth(k+1) - P_pred(k+1)) * Ck^T
+
+FBS 平滑流程:
+  1. 前向解 + 后向解按时间对齐
+  2. 协方差逆加权: P_smooth = (P_fwd^(-1) + P_bwd^(-1))^(-1)
+  3. 状态加权: x_smooth = P_smooth * (P_fwd^(-1)*x_fwd + P_bwd^(-1)*x_bwd)
 ```
 
 #### 自适应模式切换
@@ -531,7 +552,7 @@ P ← (I - K·H)·P·(I - K·H)ᵀ + K·R·Kᵀ   (Joseph 形式)
 | `maxGnssAgeForTc` | 5.0s | TC 模式最大 GNSS 数据龄期 |
 | `enableAdaptiveMode` | true | 启用自适应模式切换 |
 | `enableFeedbackCorrection` | true | 启用反馈校正 |
-| `enableSmoothing` | false | 启用平滑（预留） |
+| `enableSmoothing` | false | 启用平滑（收集前向解，供 RTS/FBS 平滑使用） |
 | `chi2Threshold` | 0.01 | 卡方检验阈值 |
 | `stateDimension` | 15 | EKF 状态维度 |
 
@@ -545,9 +566,24 @@ P ← (I - K·H)·P·(I - K·H)ᵀ + K·R·Kᵀ   (Joseph 形式)
 1. IMU 时间驱动系统时间（高频 100Hz+）
 2. GNSS 时间校准系统时间（低频 1Hz）
 3. 当 GNSS 时间有效时，计算 IMU-GNSS 时间偏差
-4. 时间偏差估计: bias = t_gnss - t_imu（一阶近似）
-5. 时钟漂移跟踪: 通过连续观测估计漂移率
+4. 一阶模型: bias = t_gnss - t_imu（指数平滑）
+5. 二阶模型: 在一阶基础上追踪钟漂率 drift_rate = d(bias)/dt
+6. 时钟漂移跟踪: 通过连续观测估计漂移率
 ```
+
+#### 二阶模型
+
+启用二阶模型后，时间同步不仅估计时间偏差，还估计钟漂率：
+
+```
+bias(k) = bias(k-1) * (1 - α) + measurement * α    // 一阶偏差滤波
+drift_rate(k) = drift_rate(k-1) * (1 - β) + inst_rate * β  // 钟漂率滤波
+imuToSystem(t) = t + bias + drift_rate * dt          // 补偿钟漂率项
+```
+
+其中 `α = 0.05`（偏差平滑系数），`β = 0.01`（漂移率平滑系数）。
+
+通过 `setSecondOrderModel(true)` 启用，`getTimeDriftRate()` 获取当前钟漂率估计。
 
 #### 关键方法
 
@@ -555,12 +591,16 @@ P ← (I - K·H)·P·(I - K·H)ᵀ + K·R·Kᵀ   (Joseph 形式)
 |------|------|
 | `feedImuTime(GTime)` | 输入 IMU 时间戳，更新系统时间和漂移 |
 | `feedGnssTime(GTime)` | 输入 GNSS 时间戳，校准系统时间 |
-| `imuToSystem(GTime)` | IMU 时间 → 系统时间（补偿偏差） |
+| `imuToSystem(GTime)` | IMU 时间 → 系统时间（补偿偏差 + 钟漂率） |
 | `gnssToSystem(GTime)` | GNSS 时间 → 系统时间（补偿偏差） |
 | `setTimeBias(double)` | 设置时间偏差（融合层估计） |
 | `getTimeBias()` | 获取当前时间偏差 |
 | `getImuTimeDrift()` | IMU 时钟漂移率 |
 | `getGnssTimeDrift()` | GNSS 时钟漂移率 |
+| `setSecondOrderModel(boolean)` | 启用/禁用二阶钟漂率模型 |
+| `isSecondOrderModel()` | 查询二阶模型状态 |
+| `getTimeDriftRate()` | 获取钟漂率估计 |
+| `setTimeDriftRate(double)` | 设置钟漂率 |
 
 ---
 
@@ -735,13 +775,69 @@ INS_ONLY:    纯 INS 递推，无外部修正
 ## 待实现
 
 - [ ] 单元测试（各模块核心算法测试）
-- [ ] PPP 精密单点定位（GnssPositionSolution 已定义 PPP 状态码，但无解算实现）
-- [ ] 前向-后向平滑在融合层的集成（InsRts/InsFbs 已实现，但 IgnavFusion 未调用）
-- [ ] 实时流式接口（NTRIP、串口）
-- [ ] 配置文件加载（YAML/JSON）
-- [ ] 结果文件输出（NMEA、KML、自定义格式）
-- [ ] 杆臂补偿在线估计（当前杆臂为固定配置，未实现在线估计）
-- [ ] 时间同步二阶模型（当前 FusionTimeProvider 仅一阶偏差估计，无钟漂率估计）
+
+### 已实现（本次新增）
+
+- [x] 前向-后向平滑在融合层的集成 — `IgnavFusion.applyRtsSmoothing()` / `IgnavFusion.applyFbsSmoothing()`，基于 `InsSolution` 实现独立于 `ignav-ins` 模块的 RTS/FBS 平滑，通过 `FusionConfig.enableSmoothing` 启用后自动收集前向解，处理完成后调用平滑方法
+- [x] 时间同步二阶模型 — `FusionTimeProvider` 新增钟漂率估计，通过 `setSecondOrderModel(true)` 启用，启用后在时间偏差估计中追踪漂移率变化，`imuToSystem()` 补偿钟漂率项
+
+### 不计划实现
+
+- 杆臂补偿在线估计 — 当前杆臂为固定配置，C++ 参考代码 `Fusing.cc` 中 `removeIGArmLever()` 也仅实现杆臂补偿，**未实现在线估计**，杆臂仍为固定配置 `ig_lever`。如需在线估计，需扩展状态向量（第18-20维）并设计相应观测方程，当前无参考实现
+
+### 已移除项（非算法库职责）
+
+- ~~PPP 精密单点定位~~ — rtklib-java 已实现 PPP 解算，`GnssPositionSolution.SolutionStatus.PPP` 状态码已定义，`GnssProviderImpl` 中 `SOLQ_PPP` 映射已就绪
+- ~~实时流式接口（NTRIP、串口）~~ — 属于应用层功能，不在算法库范围内
+- ~~配置文件加载（YAML/JSON）~~ — 属于应用层功能，不在算法库范围内
+- ~~结果文件输出（NMEA、KML、自定义格式）~~ — 属于应用层功能，不在算法库范围内
+
+#### 配置文件加载 — 为什么不需要在库中实现
+
+C++ 参考代码的 `Config.cc` 是一个 ~500 行的 YAML 解析器，功能是将 YAML 配置文件映射到 C++ 结构体。它解析的内容包括：
+
+| 配置分组 | 内容 | Java 库中的对应 |
+|---------|------|----------------|
+| `inputopt_t` | 输入文件路径（RINEX、SP3、IMU、POS 等） | ❌ 库不负责文件管理 |
+| `commonopt_t` | 处理模式、起止时间、日期 | ❌ 库不负责任务编排 |
+| `imuopt_t` | INS 对齐方式、坐标系、辅助开关（NHC/ZVU/dop_aid/tdcp_aid） | ✅ 已在 `InsConfig` 中通过 Java 属性设置 |
+| `gnssopt_t` | GNSS 采样率、模式、频点、仰角、AR 参数、天线参数 | ✅ 已在 `GnssConfig` 中通过 Java 属性设置 |
+| `outputopt_t` | 输出格式、时间系统、NMEA 间隔、小数位数 | ❌ 库不负责输出格式化 |
+| `rtklibopt_t` | RTKLIB 处理选项 | ✅ 由 rtklib-java 自身管理 |
+
+**结论**：C++ 的 `Config.cc` 本质是一个"YAML → 结构体"的映射工具，**不包含任何算法逻辑**。Java 库已通过 `InsConfig`/`GnssConfig`/`FusionConfig` 提供了等价的配置能力（构造函数默认值 + setter），调用方可以自由选择用 YAML/JSON/Properties 等任意方式填充这些配置对象。配置文件加载应由上层应用负责，库只需暴露配置接口。
+
+#### 结果文件输出 — 为什么不需要在库中实现
+
+C++ 参考代码的结果输出功能包括：
+
+| 函数 | 功能 | 性质 |
+|------|------|------|
+| `outsolhead()` | 输出结果文件头（列名、单位等） | 格式化输出 |
+| `outsol()` | 输出单历元结果（LLH/ECEF/ENU 坐标 + 状态） | 格式化输出 |
+| `outsolex()` | 输出扩展结果（NMEA GGA/RMC 格式） | 格式化输出 |
+| `convkml()` | 转换为 Google Earth KML 格式 | 可视化输出 |
+| `convgpx()` | 转换为 GPX 格式 | 可视化输出 |
+
+**结论**：这些函数全部是**纯格式化输出**，将 `sol_t`（定位结果）转为特定文件格式，**不包含任何算法逻辑**。Java 库已通过 `InsResult`/`GnssPositionSolution` 等数据结构暴露了完整的计算结果，调用方可以自行格式化为 NMEA/KML/GPX 等任意格式。结果文件输出应由上层应用负责。
+
+### 待实现算法在 C++ 参考代码中的实现情况
+
+| 算法 | Java 实现状态 | C++ 参考代码是否已实现 | 参考文件 | 备注 |
+|------|-------------|---------------------|---------|------|
+| 前向-后向平滑集成 | ✅ 已实现 | ✅ 已实现 | `TGINS/src/fusing/Fusing.cc`, `Fbs.cc` | Java 版在 `IgnavFusion` 中基于 `InsSolution` 独立实现 RTS/FBS |
+| 时间同步二阶模型 | ✅ 已实现 | ✅ 已实现 | `TGINS/src/fusing/TightCouple.cc`, `Fusing.cc` | Java 版在 `FusionTimeProvider` 中实现钟漂率估计 |
+| 杆臂在线估计 | ❌ 不计划实现 | ❌ 未实现 | `TGINS/src/fusing/Fusing.cc` 仅有 `removeIGArmLever()` | C++ 版也仅实现固定杆臂补偿，无在线估计 |
+
+**结论**：所有在 C++ 参考代码中已实现的算法，Java 版均已实现。杆臂在线估计在 C++ 中也未实现，当前不计划实现。
+
+---
+
+## 参考文档
+
+- [使用文档](docs/USAGE.md) — 配置说明、默认值、典型场景
+- [C++ 原版 BUG 记录](docs/BUGS_FIXED.md) — 记录 C++ 原版代码中发现并修复的 7 个 BUG
+- [实现差异文档](docs/IMPLEMENTATION_DIFFERENCES.md) — Java 版与 C++ 版的实现差异对照
 
 ---
 

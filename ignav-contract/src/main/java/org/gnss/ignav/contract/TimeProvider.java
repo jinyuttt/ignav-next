@@ -15,4 +15,12 @@ public interface TimeProvider {
     double getImuTimeDrift();
 
     double getGnssTimeDrift();
+
+    double getTimeDriftRate();
+
+    void setTimeDriftRate(double rate);
+
+    boolean isSecondOrderModel();
+
+    void setSecondOrderModel(boolean enabled);
 }
