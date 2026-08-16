@@ -19,6 +19,8 @@ import org.slf4j.LoggerFactory;
 
 public class IgnavFusion {
 
+    private static final double OMGE = 7.2921151467e-5;
+
     private static final Logger logger = LoggerFactory.getLogger(IgnavFusion.class);
 
     private final GnssProvider gnssProvider;
@@ -235,19 +237,44 @@ public class IgnavFusion {
 
         int nx = config.getStateDimension();
         int nm = 3;
-        int IP = 6;
+        int IA = 0, IV = 3, IP = 6, IBG = 12, ILA = 18;
 
         double[] v = new double[nm];
         double[] H = new double[nm * nx];
         double[] R = new double[nm * nm];
 
+        double[] insPosAnt = insPred.getPosEcef().clone();
+        double[] lever = getLeverArm();
+        double[] Cbe = insPred.getAttDcm();
+        if (lever != null && Cbe != null) {
+            for (int i = 0; i < 3; i++) {
+                insPosAnt[i] += Cbe[i] * lever[0] + Cbe[3 + i] * lever[1] + Cbe[6 + i] * lever[2];
+            }
+        }
+
         for (int i = 0; i < 3; i++) {
-            v[i] = gnssSol.getPosEcef()[i] - insPred.getPosEcef()[i];
+            v[i] = gnssSol.getPosEcef()[i] - insPosAnt[i];
+        }
+
+        double[] dpdatt = null;
+        if (lever != null && Cbe != null) {
+            dpdatt = jacobianPAtt(Cbe, lever);
         }
 
         for (int i = 0; i < nm; i++) {
             for (int j = 0; j < nx; j++) {
-                H[i * nx + j] = (j == IP + i) ? -1.0 : 0.0;
+                H[i * nx + j] = 0.0;
+            }
+            if (dpdatt != null) {
+                for (int j = IA; j < IA + 3 && j < nx; j++) {
+                    H[i * nx + j] = dpdatt[i + (j - IA) * 3];
+                }
+            }
+            H[i * nx + IP + i] = -1.0;
+            if (lever != null && Cbe != null && nx > ILA + 2) {
+                for (int j = ILA; j < ILA + 3 && j < nx; j++) {
+                    H[i * nx + j] = -Cbe[i + (j - ILA) * 3];
+                }
             }
         }
 
@@ -271,20 +298,47 @@ public class IgnavFusion {
         int nx = config.getStateDimension();
         boolean hasVel = gnssSol.getVelEcef() != null && insPred.getVelEcef() != null;
         int nm = hasVel ? 6 : 3;
-        int IP = 6;
-        int IV = 3;
+        int IA = 0, IV = 3, IP = 6, IBA = 9, IBG = 12, ILA = 18;
 
         double[] v = new double[nm];
         double[] H = new double[nm * nx];
         double[] R = new double[nm * nm];
 
+        double[] insPosAnt = insPred.getPosEcef().clone();
+        double[] lever = getLeverArm();
+        double[] Cbe = insPred.getAttDcm();
+        double[] velEcef = insPred.getVelEcef();
+        double[] omega = insPred.getGyro() != null ? insPred.getGyro() : new double[3];
+
+        if (lever != null && Cbe != null) {
+            for (int i = 0; i < 3; i++) {
+                insPosAnt[i] += Cbe[i] * lever[0] + Cbe[3 + i] * lever[1] + Cbe[6 + i] * lever[2];
+            }
+        }
+
         for (int i = 0; i < 3; i++) {
-            v[i] = gnssSol.getPosEcef()[i] - insPred.getPosEcef()[i];
+            v[i] = gnssSol.getPosEcef()[i] - insPosAnt[i];
+        }
+
+        double[] dpdatt = null;
+        if (lever != null && Cbe != null) {
+            dpdatt = jacobianPAtt(Cbe, lever);
         }
 
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j < nx; j++) {
-                H[i * nx + j] = (j == IP + i) ? -1.0 : 0.0;
+                H[i * nx + j] = 0.0;
+            }
+            if (dpdatt != null) {
+                for (int j = IA; j < IA + 3 && j < nx; j++) {
+                    H[i * nx + j] = dpdatt[i + (j - IA) * 3];
+                }
+            }
+            H[i * nx + IP + i] = -1.0;
+            if (lever != null && Cbe != null && nx > ILA + 2) {
+                for (int j = ILA; j < ILA + 3 && j < nx; j++) {
+                    H[i * nx + j] = -Cbe[i + (j - ILA) * 3];
+                }
             }
         }
 
@@ -300,13 +354,63 @@ public class IgnavFusion {
         }
 
         if (hasVel) {
+            double[] insVelAnt = insPred.getVelEcef().clone();
+            double[] omgeLever = null;
+            double[] omgeCbeLever = null;
+            if (lever != null && Cbe != null) {
+                double[] omge = {0.0, OMGE, 0.0, -OMGE, 0.0, 0.0, 0.0, 0.0, 0.0};
+                double[] CbeLever = new double[3];
+                for (int i = 0; i < 3; i++) {
+                    CbeLever[i] = Cbe[i] * lever[0] + Cbe[3 + i] * lever[1] + Cbe[6 + i] * lever[2];
+                }
+                omgeLever = new double[3];
+                for (int i = 0; i < 3; i++) {
+                    omgeLever[i] = omge[i] * CbeLever[0] + omge[3 + i] * CbeLever[1] + omge[6 + i] * CbeLever[2];
+                }
+                for (int i = 0; i < 3; i++) {
+                    insVelAnt[i] += omgeLever[i];
+                }
+
+                omgeCbeLever = new double[3];
+                for (int i = 0; i < 3; i++) {
+                    omgeCbeLever[i] = omge[i] * lever[0] + omge[3 + i] * lever[1] + omge[6 + i] * lever[2];
+                }
+            }
+
             for (int i = 0; i < 3; i++) {
-                v[3 + i] = gnssSol.getVelEcef()[i] - insPred.getVelEcef()[i];
+                v[3 + i] = gnssSol.getVelEcef()[i] - insVelAnt[i];
+            }
+
+            double[] dvdatt = null;
+            if (lever != null && Cbe != null) {
+                dvdatt = jacobianVAtt(Cbe, lever, omega);
+            }
+            double[] dvdbg = null;
+            if (lever != null && Cbe != null) {
+                dvdbg = jacobianVBg(Cbe, lever);
             }
 
             for (int i = 0; i < 3; i++) {
                 for (int j = 0; j < nx; j++) {
-                    H[(3 + i) * nx + j] = (j == IV + i) ? -1.0 : 0.0;
+                    H[(3 + i) * nx + j] = 0.0;
+                }
+                if (dvdatt != null) {
+                    for (int j = IA; j < IA + 3 && j < nx; j++) {
+                        H[(3 + i) * nx + j] = dvdatt[i + (j - IA) * 3];
+                    }
+                }
+                H[(3 + i) * nx + IV + i] = -1.0;
+                if (dvdbg != null) {
+                    for (int j = IBG; j < IBG + 3 && j < nx; j++) {
+                        H[(3 + i) * nx + j] = dvdbg[i + (j - IBG) * 3];
+                    }
+                }
+                if (lever != null && Cbe != null && nx > ILA + 2) {
+                    if (omgeCbeLever != null) {
+                        for (int j = ILA; j < ILA + 3 && j < nx; j++) {
+                            H[(3 + i) * nx + j] = -omgeCbeLever[i + (j - ILA) * 3];
+                        }
+                    }
                 }
             }
 
@@ -323,6 +427,14 @@ public class IgnavFusion {
         }
 
         return new GnssObservation(gnssSol.getTime(), v, H, R, nm, nx);
+    }
+
+    private double[] getLeverArm() {
+        InsConfig insCfg = config.getInsConfig();
+        if (insCfg != null && insCfg.getLeverArm() != null) {
+            return insCfg.getLeverArm();
+        }
+        return null;
     }
 
     private double[] buildQDiagonal(double dt) {
@@ -507,5 +619,63 @@ public class IgnavFusion {
         lastFusionTime = new GTime();
         lastFusedSolution = new InsSolution();
         logger.info("IgnavFusion reset");
+    }
+
+    private static double[] jacobianPAtt(double[] Cbe, double[] lever) {
+        double[] dpdatt = new double[9];
+        double[] CbeLever = new double[3];
+        for (int i = 0; i < 3; i++) {
+            CbeLever[i] = Cbe[i] * lever[0] + Cbe[3 + i] * lever[1] + Cbe[6 + i] * lever[2];
+        }
+        skewSym3(CbeLever, dpdatt);
+        return dpdatt;
+    }
+
+    private static double[] jacobianVAtt(double[] Cbe, double[] lever, double[] omgb) {
+        double[] dvdatt = new double[9];
+        double[] skewOmgb = new double[9];
+        skewSym3(omgb, skewOmgb);
+        double[] skewOmgbLever = new double[3];
+        for (int i = 0; i < 3; i++) {
+            skewOmgbLever[i] = 0;
+            for (int k = 0; k < 3; k++) {
+                skewOmgbLever[i] += skewOmgb[i * 3 + k] * lever[k];
+            }
+        }
+        double[] CbeSkewOmgbLever = new double[3];
+        for (int i = 0; i < 3; i++) {
+            CbeSkewOmgbLever[i] = 0;
+            for (int k = 0; k < 3; k++) {
+                CbeSkewOmgbLever[i] += Cbe[i + k * 3] * skewOmgbLever[k];
+            }
+        }
+        double[] omgie = new double[3];
+        for (int i = 0; i < 3; i++) {
+            double s = Cbe[2 + i * 3] * lever[0] + Cbe[5 + i * 3] * lever[1] + Cbe[8 + i * 3] * lever[2];
+            omgie[i] = CbeSkewOmgbLever[i] - OMGE * s;
+        }
+        skewSym3(omgie, dvdatt);
+        return dvdatt;
+    }
+
+    private static double[] jacobianVBg(double[] Cbe, double[] lever) {
+        double[] dvdbg = new double[9];
+        double[] skewLever = new double[9];
+        skewSym3(lever, skewLever);
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                dvdbg[i * 3 + j] = 0;
+                for (int k = 0; k < 3; k++) {
+                    dvdbg[i * 3 + j] += Cbe[i + k * 3] * skewLever[k * 3 + j];
+                }
+            }
+        }
+        return dvdbg;
+    }
+
+    private static void skewSym3(double[] a, double[] M) {
+        M[0] = 0.0;  M[1] = -a[2]; M[2] = a[1];
+        M[3] = a[2]; M[4] = 0.0;   M[5] = -a[0];
+        M[6] = -a[1]; M[7] = a[0]; M[8] = 0.0;
     }
 }

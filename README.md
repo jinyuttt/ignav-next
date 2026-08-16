@@ -2,6 +2,32 @@
 
 INS/GNSS 组合导航系统 — 基于接口契约的多模块 Maven 项目
 
+## 项目起源
+
+ignav-next 的算法核心源自 **IGNAV**（INS/GNSS Navigation）C 语言项目。IGNAV 是一个开源的 INS/GNSS 紧组合导航算法库，原始版本使用 C 语言编写，采用过程式编程风格，核心算法包括 INS 机械编排、EKF 松/紧组合、辅助约束（NHC/ZVU/ZARU/里程计）、RTS/FBS 平滑等。
+
+将 C 版本移植为 Java 版本的原因：
+
+1. **可维护性**：C 版本的全局状态和过程式风格导致代码耦合度高、难以扩展。Java 的面向对象特性天然适合模块化设计
+2. **跨平台部署**：Java 一次编译到处运行，便于在 Android、嵌入式 Linux、服务器等平台部署
+3. **生态优势**：Java 生态中 rtklib-java 提供 GNSS 解算能力，EJML 提供高效矩阵运算，SLF4J/Logback 提供结构化日志
+4. **工程规范**：Maven 多模块 + 契约层架构，使 INS、GNSS、融合三层可独立开发、独立测试、独立演进
+
+本项目在算法层面与 C 版本保持一致（相同的力学模型、相同的 EKF 状态定义、相同的辅助约束逻辑），但在架构层面进行了重新设计：
+
+| 方面 | C 版本 (IGNAV) | Java 版本 (ignav-next) |
+|------|---------------|----------------------|
+| 语言 | C | Java 17 |
+| 架构 | 过程式，全局状态 | 契约层 + 模块化 + 接口驱动 |
+| 矩阵库 | 自定义 matmul/matinv | EJML (Efficient Java Matrix Library) |
+| GNSS 解算 | RTKLIB C | rtklib-java |
+| 构建系统 | Makefile | Maven 多模块 |
+| 日志 | printf | SLF4J + Logback |
+| 状态管理 | 全局 InsState 结构体 | InsProvider/InsState 封装 |
+| 融合模式 | 编译时选择 | 运行时自适应切换 |
+| 辅助约束 | 函数调用 | 独立 Aiding 类 + 策略模式 |
+| 平滑 | 后处理脚本 | 内置 InsRts/InsFbs |
+
 ## 项目概述
 
 ignav-next 是一个模块化的 INS/GNSS 组合导航系统，核心设计原则是 **INS 和 GNSS 作为两个独立演进的模块，通过 contract 层连接，融合层做主控协调双向数据流**。
@@ -708,15 +734,50 @@ INS_ONLY:    纯 INS 递推，无外部修正
 
 ## 已实现
 
-- [x] ignav-contract 模块（共享接口和数据类型）
-- [x] ignav-ins 模块（机械编排、EKF、辅助约束、平滑）
-- [x] ignav-gnss 模块（SPP/RTK、RTCM、RINEX、紧组合观测构建）
-- [x] ignav-fusion 模块（LC/STC/TC 融合引擎、自适应模式切换、时间同步）
-- [x] ignav-app 模块（离线处理、Demo 模式、默认配置工厂）
-- [x] GnssProviderImpl 实现
-- [x] IgnavFusion 融合编排器
-- [x] EkfFusion EKF 融合引擎
-- [x] FusionTimeProvider 时间同步
+### ignav-contract 模块
+- [x] InsProvider / GnssProvider / TimeProvider 接口定义
+- [x] GTime / ImuMeasurement / InsPrediction / InsSolution / GnssObservation / GnssPositionSolution 数据类
+- [x] InsConfig / GnssConfig / FusionMode / SystemHealth / StateCorrection 配置与状态类
+- [x] ContractVersion 契约版本管理
+
+### ignav-ins 模块
+- [x] InsMech — 正向机械编排（ECEF/NED 双框架，旋转+划桨补偿）
+- [x] InsBackMech — 反向机械编排
+- [x] InsAlignMech — 粗对准 + 精对准 + 速度匹配对准
+- [x] InsInitRt — 实时初始化（单天线速度辅助 / 双天线姿态辅助）
+- [x] InsEkf — EKF 预测、F 矩阵构建、矩阵指数法（precPhi/expmat）
+- [x] InsNhc — 非完整约束（侧向/垂向速度 = 0）
+- [x] InsZvu — 零速更新（ZVU）
+- [x] InsZaru — 零角速率更新（ZARU）
+- [x] InsOdo — 里程计辅助
+- [x] InsMagnetometer — 磁力计航向辅助
+- [x] InsStaticDetect — 静态检测（GLRT / MV / MAG / ARE / ODO 五种算法）
+- [x] InsRts — RTS 固定区间平滑
+- [x] InsFbs — 前向-后向平滑
+- [x] InsMath — 数学工具（矩阵运算、坐标变换、四元数、杆臂补偿 gapv2ipv）
+- [x] InsProviderImpl — InsProvider 契约完整实现
+
+### ignav-gnss 模块
+- [x] GnssProviderImpl — GnssProvider 契约完整实现
+- [x] SPP 单点定位（多系统支持）
+- [x] RTK 相对定位
+- [x] 紧组合观测构建（伪距/多普勒新息 + H/R 矩阵）
+- [x] RTCM 数据流解码
+- [x] RINEX 文件加载
+
+### ignav-fusion 模块
+- [x] IgnavFusion — 融合主编排器（LC/STC/TC/INS_ONLY 四模式）
+- [x] EkfFusion — EKF 融合引擎（含卡方检验、Joseph 形式协方差更新）
+- [x] buildLcObservation — LC 观测构建（含姿态误差 Jacobian + 杆臂补偿）
+- [x] buildStcObservation — STC 观测构建（含姿态/陀螺零偏 Jacobian + 杆臂补偿）
+- [x] tcUpdate — TC 独立更新逻辑（原始伪距/多普勒观测）
+- [x] jacobianPAtt / jacobianVAtt / jacobianVBg — 观测矩阵 Jacobian
+- [x] FusionConfig — 融合配置（自适应模式、反馈校正、卡方阈值等）
+- [x] FusionTimeProvider — IMU/GNSS 时间同步
+- [x] 自适应模式切换（滞回 + 冷却期 + GNSS 龄期检查）
+
+### ignav-app 模块
+- [x] IgnavApp — 应用入口（离线处理 / 实时输入 / Demo 模式）
 
 ## 待实现
 

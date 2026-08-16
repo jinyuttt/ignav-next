@@ -691,4 +691,25 @@ public final class InsMath {
         ned2xyz(pos, Cne);
         matmul3v("TN", Cne, ins.ve, vn);
     }
+
+    public static void gapv2ipv(double[] pos, double[] vel, double[] Cbe, double[] lever,
+                                org.gnss.ignav.ins.data.Imud imu, double[] posi, double[] veli) {
+        double[] T = new double[9];
+        double[] TT = new double[9];
+
+        if (posi != null) {
+            matcpy(posi, pos, 3, 1);
+            matmul("NN", 3, 1, 3, -1.0, Cbe, lever, 1.0, posi);
+        }
+        if (veli != null) {
+            skewsym3(imu.gyro, T);
+            matmul("NN", 3, 1, 3, 1.0, T, lever, 0.0, TT);
+            matmul("NN", 3, 1, 3, 1.0, Cbe, TT, 0.0, T);
+
+            double[] omgeMat = {0.0, IgnavConstants.OMGE, 0.0, -IgnavConstants.OMGE, 0.0, 0.0, 0.0, 0.0, 0.0};
+            matmul33("NNN", omgeMat, Cbe, lever, 3, 3, 3, 1, TT);
+            for (int i = 0; i < 3; i++)
+                veli[i] = vel[i] - T[i] + TT[i];
+        }
+    }
 }

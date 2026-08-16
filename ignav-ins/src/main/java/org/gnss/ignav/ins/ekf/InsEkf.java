@@ -193,4 +193,41 @@ public final class InsEkf {
         for (int i = is; i < is + n; i++)
             Q[i + i * nx] = v * Math.abs(dt);
     }
+
+    public static void precPhi(InsState ins, InsOpt opt, double dt) {
+        int nx = ins.nx;
+        double[] F = new double[nx * nx];
+        InsMath.matcpy(F, ins.F, nx, nx);
+        for (int i = 0; i < nx * nx; i++)
+            F[i] *= dt;
+        expmat(F, nx, ins.F);
+    }
+
+    public static void getPhi1(InsState ins, InsOpt opt, double dt) {
+        int nx = ins.nx;
+        double[] F = new double[nx * nx];
+        double[] I = InsMath.eye(nx);
+        InsMath.matcpy(F, ins.F, nx, nx);
+        for (int i = 0; i < nx * nx; i++)
+            F[i] *= dt;
+        for (int i = 0; i < nx * nx; i++)
+            ins.F[i] = I[i] + F[i];
+    }
+
+    private static void expmat(double[] A, int n, double[] E) {
+        double[] I = InsMath.eye(n);
+        double[] S = new double[n * n];
+        double[] T = new double[n * n];
+        InsMath.matcpy(S, A, n, n);
+        InsMath.matcpy(E, I, n, n);
+        for (int k = 1; k <= 12; k++) {
+            double scale = 1.0 / k;
+            InsMath.matmul("NN", n, n, n, scale, A, S, 0.0, T);
+            double[] tmp = S;
+            S = T;
+            T = tmp;
+            for (int i = 0; i < n * n; i++)
+                E[i] += S[i];
+        }
+    }
 }

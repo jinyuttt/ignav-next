@@ -17,7 +17,7 @@ public class EkfFusion {
     private DMatrixRMaj x;
     private DMatrixRMaj P;
     private boolean initialized;
-    private double chi2Threshold;
+    private double chi2Alpha;
     private double lastInnovationRatio;
 
     public EkfFusion() {
@@ -25,7 +25,7 @@ public class EkfFusion {
         this.x = new DMatrixRMaj(nx, 1);
         this.P = new DMatrixRMaj(nx, nx);
         this.initialized = false;
-        this.chi2Threshold = 0.01;
+        this.chi2Alpha = 0.01;
         this.lastInnovationRatio = 0.0;
     }
 
@@ -134,11 +134,12 @@ public class EkfFusion {
         CommonOps_DDRM.transpose(v, vT);
         CommonOps_DDRM.mult(vT, Sinv, vSv);
 
-        double innovationRatio = vSv.get(0, 0) / nm;
-        lastInnovationRatio = innovationRatio;
+        double innovationStat = vSv.get(0, 0);
+        lastInnovationRatio = innovationStat / nm;
 
-        if (innovationRatio > chi2Threshold * 10) {
-            logger.warn("Innovation ratio too large: {}, possible outlier", innovationRatio);
+        double chi2Th = chi2Threshold(nm, 0.01);
+        if (innovationStat > chi2Th) {
+            logger.warn("LC: chi2 test failed, stat={:.2f}, threshold={:.2f}", innovationStat, chi2Th);
             return null;
         }
 
@@ -166,7 +167,115 @@ public class EkfFusion {
             return null;
         }
 
-        return lcUpdate(obs);
+        int nm = obs.getNm();
+
+        if (nm < 4) {
+            logger.debug("TC: insufficient observations ({})", nm);
+            return null;
+        }
+
+        double[] vArr = obs.getV();
+        double[] HArr = obs.getH();
+        double[] RArr = obs.getR();
+
+        if (vArr == null || HArr == null || RArr == null || vArr.length < nm) {
+            return null;
+        }
+
+        DMatrixRMaj v = new DMatrixRMaj(nm, 1);
+        for (int i = 0; i < nm; i++) v.set(i, 0, vArr[i]);
+
+        DMatrixRMaj H = new DMatrixRMaj(nm, nx);
+        for (int i = 0; i < nm; i++) {
+            for (int j = 0; j < nx; j++) {
+                H.set(i, j, HArr[i * nx + j]);
+            }
+        }
+
+        DMatrixRMaj R = new DMatrixRMaj(nm, nm);
+        for (int i = 0; i < nm; i++) {
+            for (int j = 0; j < nm; j++) {
+                R.set(i, j, RArr[i * nm + j]);
+            }
+        }
+
+        DMatrixRMaj PHt = new DMatrixRMaj(nx, nm);
+        CommonOps_DDRM.multTransB(P, H, PHt);
+
+        DMatrixRMaj S = new DMatrixRMaj(nm, nm);
+        CommonOps_DDRM.mult(H, PHt, S);
+        CommonOps_DDRM.addEquals(S, R);
+
+        DMatrixRMaj Sinv = new DMatrixRMaj(nm, nm);
+        if (!CommonOps_DDRM.invert(S, Sinv)) {
+            logger.warn("TC: S inversion failed, skipping update");
+            return null;
+        }
+
+        double[] vSinv = new double[nm];
+        for (int i = 0; i < nm; i++) {
+            vSinv[i] = 0;
+            for (int j = 0; j < nm; j++) {
+                vSinv[i] += v.get(j, 0) * Sinv.get(j, i);
+            }
+        }
+        double innovationStat = 0;
+        for (int i = 0; i < nm; i++) innovationStat += vArr[i] * vSinv[i];
+
+        double chi2Th = chi2Threshold(nm, 0.01);
+        if (innovationStat > chi2Th * 3) {
+            logger.warn("TC: chi2 test failed, stat={:.2f}, threshold={:.2f}", innovationStat, chi2Th);
+            return null;
+        }
+
+        DMatrixRMaj K = new DMatrixRMaj(nx, nm);
+        CommonOps_DDRM.mult(PHt, Sinv, K);
+
+        DMatrixRMaj dx = new DMatrixRMaj(nx, 1);
+        CommonOps_DDRM.mult(K, v, dx);
+
+        DMatrixRMaj KH = new DMatrixRMaj(nx, nx);
+        CommonOps_DDRM.mult(K, H, KH);
+
+        DMatrixRMaj I = new DMatrixRMaj(nx, nx);
+        CommonOps_DDRM.setIdentity(I);
+
+        DMatrixRMaj IKH = new DMatrixRMaj(nx, nx);
+        CommonOps_DDRM.subtract(I, KH, IKH);
+
+        DMatrixRMaj dP = new DMatrixRMaj(nx, nx);
+        CommonOps_DDRM.mult(IKH, P, dP);
+
+        double[] dxArr = new double[nx];
+        double[] dPArr = new double[nx * nx];
+        for (int i = 0; i < nx; i++) {
+            dxArr[i] = dx.get(i, 0);
+        }
+        for (int i = 0; i < nx; i++) {
+            for (int j = 0; j < nx; j++) {
+                dPArr[i * nx + j] = dP.get(i, j) - P.get(i, j);
+            }
+        }
+
+        CommonOps_DDRM.addEquals(x, dx);
+        P.setTo(dP);
+
+        symmetrize(P);
+
+        lastInnovationRatio = innovationStat / nm;
+
+        return new StateCorrection(dxArr, dPArr);
+    }
+
+    private double chi2Threshold(int df, double alpha) {
+        if (df <= 0) return 0.0;
+        if (df == 1) return 6.635;
+        if (df == 2) return 9.210;
+        if (df == 3) return 11.345;
+        if (df == 4) return 13.277;
+        if (df == 5) return 15.086;
+        if (df == 6) return 16.812;
+        return df + 2.0 * Math.sqrt(2.0 * df);
     }
 
     public void predict(double dt, double[] Qdiag) {
