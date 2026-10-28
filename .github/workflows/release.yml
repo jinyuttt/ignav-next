@@ -63,6 +63,10 @@ jobs:
             echo "::error::无法解析版本号（事件=$EVENT_NAME，ref=$GITHUB_REF）"
             exit 1
           fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)*([-._][0-9A-Za-z._-]+)?$'; then
+            echo "::error::版本号格式非法：[$VERSION]。应为 1.0.0 或 1.0.0-rc1 之类，且不含 v 前缀"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 

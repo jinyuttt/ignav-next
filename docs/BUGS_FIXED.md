@@ -232,7 +232,8 @@ model.max1[i] = Integer.parseInt(parts[3]);
 ## 修复验证
 
 所有修复均通过以下验证：
-- 52 个单元测试全部通过
+- 56 个单元测试全部通过
 - WMM2015 模型：declination=-4.32°, inclination=46.61°（武汉，2020年）
 - IGRF12 模型：declination=-4.66°, inclination=46.01°（武汉，2020年）
+- WMM2025 模型：与 NOAA 官方 100 个参考点交叉验证，最大偏差 0.005°（D/I）、0.009 nT（H/F），处于参考值舍入精度内（`data/geomag`，见 [data/README.md](../data/README.md)）
 - 磁力计 EKF 更新功能正常

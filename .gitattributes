@@ -1,0 +1,5 @@
+# 测试数据与地磁系数文件必须保持原始字节。
+# Windows 下 core.autocrlf=true 会把 LF 转成 CRLF，导致
+# data/README.md 中登记的 SHA256 校验值失效，故对这些路径禁用换行转换。
+data/** -text
+**/*.COF -text

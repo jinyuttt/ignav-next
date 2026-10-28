@@ -59,8 +59,8 @@ ignav-app → ignav-fusion → ignav-contract ← ignav-ins
 |------|------|
 | Java | 17 |
 | Maven | 3.9.x |
-| EJML | 0.43.1 |
-| rtklib-java | 2.0.5 |
+| EJML | 0.41 |
+| rtklib-core | 3.2.0 |
 | SLF4J | 2.0.9 |
 | Logback | 1.4.8 |
 | JUnit | 5.9.2 |
@@ -766,7 +766,7 @@ INS_ONLY:    纯 INS 递推，无外部修正
 |------|------|
 | ignav-contract | 无（纯接口 + 数据类） |
 | ignav-ins | ignav-contract, ejml-all, slf4j-api |
-| ignav-gnss | ignav-contract, rtklib-java, ejml-all, slf4j-api |
+| ignav-gnss | ignav-contract, rtklib-core, ejml-all, slf4j-api |
 | ignav-fusion | ignav-contract, ignav-ins, ignav-gnss, ejml-all, slf4j-api |
 | ignav-app | ignav-fusion, logback-classic |
 
@@ -838,6 +838,41 @@ C++ 参考代码的结果输出功能包括：
 - [使用文档](docs/USAGE.md) — 配置说明、默认值、典型场景
 - [C++ 原版 BUG 记录](docs/BUGS_FIXED.md) — 记录 C++ 原版代码中发现并修复的 7 个 BUG
 - [实现差异文档](docs/IMPLEMENTATION_DIFFERENCES.md) — Java 版与 C++ 版的实现差异对照
+
+---
+
+## 测试策略与验证边界
+
+本项目的验证分三层，每层的职责与边界都是明确的。
+
+### 第一层：底层数学 — 单元测试覆盖
+
+EKF 矩阵运算、磁力计航向辅助、RTS/FBS 平滑、辅助约束（NHC/ZVU/ZARU/里程计）等底层数学环节，以单元测试逐项覆盖，并与 C++ 原版逐值对比，完成跨语言 Bug 修复验证 —— 移植过程中发现并修复的 7 个 C++ 原版 BUG 均有对照记录（见 [BUGS_FIXED.md](docs/BUGS_FIXED.md)）。这一层的目标是**数学正确性可证**，不依赖任何外部数据。
+
+### 第一层补充：公开参考数据交叉验证 — [data/](data/README.md)
+
+除与原版逐值对比外，凡有权威机构公开参考值的算法，均直接对齐官方数据验证：
+
+- **地磁模型**：使用 NOAA/NCEI 官方 WMM2025 系数文件与随包发布的 100 个参考点，覆盖极点附近、赤道、南北半球与 0–100 km 高度。实测最大偏差 0.005°（D/I）、0.009 nT（H/F），处于参考值自身舍入精度内。
+
+`data/` 目录只收录**公开可再分发**的数据，逐文件登记来源 URL、许可证与 SHA256；体积大或再分发受限的真实观测数据（IGS RINEX、KITTI、EuRoC 等）不入库，仅在 [data/README.md](data/README.md) 中登记获取方式。
+
+### 第二层：模块解耦 — 数据接口驱动
+
+`ignav-contract`、`ignav-ins`、`ignav-gnss`、`ignav-fusion`、`ignav-app` 五个模块完全基于 `ignav-contract` 中定义的数据接口解耦，模块之间不存在直接依赖。因此每个模块都可以脱离其余模块单独编译、单独测试、单独替换实现。这种解耦本身就是可测试性的前提：替换任一层为测试桩，其余层的行为完全可预期。
+
+### 第三层：端到端 — 拒绝伪造数据
+
+为保证系统的鲁棒性与正确性，**本项目拒绝使用伪造的混合数据进行端到端测试**。人工拼接的 IMU 序列与 GNSS 观测序列，看起来能跑通全流程，却无法暴露真实系统里最致命的那类问题：
+
+- 时间同步的钟差与钟漂（伪造数据通常共享同一时间基准）
+- 杆臂标定的实际偏差与安装角误差
+- 城市遮挡、多路径、周跳引起的 GNSS 观测异常
+- 真实车载动态下的比力/角速度量级与噪声特性
+
+因此，**所有端到端性能验证一律交由真实用户场景闭环** —— 真实 RINEX 遮挡数据、真实车载 IMU 数据、真实动态轨迹。只有真实数据才能验证系统在真实世界中的鲁棒性；伪造数据能得到的"通过"，不构成任何工程结论。
+
+> 设计取向：宁可让端到端验证保持空白，也不接受用合成数据填充出来的虚假覆盖率。
 
 ---
 
