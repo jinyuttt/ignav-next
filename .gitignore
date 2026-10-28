@@ -6,6 +6,8 @@
 
 # Package files
 *.jar
+# 仓库内第三方依赖（org.rtklib 未发布到公共仓库，需随仓库提供）
+!libs/*.jar
 *.war
 *.ear
 *.zip
